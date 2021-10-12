@@ -18,8 +18,10 @@
 #define UVECTOR_H
 
 #include "dalloc.h"
+#include <new>
+#include <type_traits>
 
-#define UVECTOR_VERSION             1.1.0
+#define UVECTOR_VERSION             1.2.0
 
 #define CAPACITY_RESERVE_KOEF 		1.2
 #define uvector_debug				printf
@@ -63,6 +65,7 @@ public:
     bool shrink_to_fit();
     void assign_mem_pointer(heap_t *mem_ptr);
     void info();
+    heap_t* get_mem_pointer() const;
 };
 
 template<typename T>
@@ -71,7 +74,10 @@ T& uvector<T>::at(uint32_t i){
         uvector_debug("uvector<T>::at(): index %lu is out of range\n", (long unsigned int)i);
         return err_retval;
     }
-    else return container_ptr[i];
+    else {
+        T* obj_ptr = (T*)((size_t)container_ptr + i*sizeof(T));
+        return *obj_ptr;
+    }
 }
 
 template<typename T>
@@ -123,12 +129,20 @@ bool uvector<T>::reserve(uint32_t new_capacity){
        return true;
     }
     if(reserve_new_memory(new_capacity, &container_ptr_res) != false){
+        for(uint32_t i = 0; i < new_capacity; i++){
+            new ((T*)((size_t)container_ptr_res + i*sizeof(T))) T;
+        }
         for(uint32_t i = 0; i < capacity_val; i++){
-            container_ptr_res[i] = container_ptr[i];
+            T* obj_new_ptr = (T*)((size_t)container_ptr_res + i*sizeof(T));
+            T* obj_old_ptr = (T*)((size_t)container_ptr + i*sizeof(T));
+            *obj_new_ptr = *obj_old_ptr;
         }
-        for(uint32_t i = 0; i < new_capacity - capacity_val; i++){
-            container_ptr_res[capacity_val + i] = T();
+
+        for(uint32_t i = 0; i < capacity_val; i++){
+            T* obj_ptr = (T*)((size_t)container_ptr + i*sizeof(T));
+            obj_ptr->~T();
         }
+
         if(validate_ptr(this->alloc_mem_ptr, reinterpret_cast<void**>(&container_ptr), USING_PTR_ADDRESS, NULL) != false){
             dfree(this->alloc_mem_ptr, reinterpret_cast<void**>(&container_ptr), USING_PTR_ADDRESS);
         }
@@ -161,9 +175,6 @@ bool uvector<T>::resize(uint32_t new_vect_size){
 
     if(new_vect_size > size_val){
         if(capacity_val >= new_vect_size){
-            for(uint32_t i = 0; i < new_vect_size - size_val; i++){
-                container_ptr[size_val + i] = T();
-            }
             size_val = new_vect_size;
             return true;
         }
@@ -182,7 +193,8 @@ bool uvector<T>::resize(uint32_t new_vect_size, T value){
     uint32_t old_size = size_val;
     if(resize(new_vect_size) != false){
         for(uint32_t i = 0; i < new_vect_size - old_size; i++){
-            container_ptr[old_size + i] = value;
+            T* obj_ptr = (T*)((size_t)container_ptr + (i + old_size)*sizeof(T));
+            *obj_ptr = value;
         }
         return true;
     }
@@ -192,12 +204,14 @@ bool uvector<T>::resize(uint32_t new_vect_size, T value){
 template<typename T>
 bool uvector<T>::push_back(T item){
     if(capacity_val > size_val){
-        container_ptr[size_val] = item;
+        T* obj_ptr = (T*)((size_t)container_ptr + size_val*sizeof(T));
+        *obj_ptr = item;
         size_val++;
         return true;
     }
     if(resize(size_val + 1) != false){
-        container_ptr[size_val - 1] = item;
+        T* obj_ptr = (T*)((size_t)container_ptr + (size_val - 1)*sizeof(T));
+        *obj_ptr = item;
         return true;
     }
     return false;
@@ -226,7 +240,9 @@ bool uvector<T>::shrink_to_fit(){
 
     if(reserve_new_memory(size_val, &container_ptr_res) != false){
         for(uint32_t i = 0; i < size_val; i++){
-            container_ptr_res[i] = container_ptr[i];
+            T* obj_ptr_res = (T*)((size_t)container_ptr_res + i*sizeof(T));
+            T* obj_ptr = (T*)((size_t)container_ptr + i*sizeof(T));
+            *obj_ptr_res = *obj_ptr;
         }
         dfree(this->alloc_mem_ptr, reinterpret_cast<void**>(&container_ptr), USING_PTR_ADDRESS);
         replace_pointers(this->alloc_mem_ptr, reinterpret_cast<void**>(&container_ptr_res), reinterpret_cast<void**>(&container_ptr));
@@ -242,6 +258,11 @@ void uvector<T>::assign_mem_pointer(heap_t *mem_ptr){
 }
 
 template<typename T>
+heap_t* uvector<T>::get_mem_pointer() const{
+    return this->alloc_mem_ptr;
+}
+
+template<typename T>
 void uvector<T>::info(){
     uvector_debug("vector info(): start ptr: 0x%08lX, stop ptr: 0x%08lX, total size: %d bytes\n", container_ptr, static_cast<uint8_t *>(&container_ptr[capacity() - 1]), capacity()*sizeof(T));
 }
@@ -249,10 +270,10 @@ void uvector<T>::info(){
 template<typename T>
 uvector<T>& uvector<T>::operator = (const uvector &vect){
     if(&vect != this){
-        size_val = vect.size_val;
-        capacity_val = vect.capacity_val;
-        container_ptr = vect.container_ptr;
-        container_ptr_res = vect.container_ptr_res;
+        size_val = 0;
+        capacity_val = 0;
+        container_ptr = NULL;
+        container_ptr_res = NULL;
         this->alloc_mem_ptr = vect.alloc_mem_ptr;
         for(uint32_t i = 0; i < vect.size(); i++){
             this->push_back(vect.data()[i]);
@@ -263,6 +284,9 @@ uvector<T>& uvector<T>::operator = (const uvector &vect){
 
 template<typename T>
 uvector<T>::~uvector(){
+    for(uint32_t i = 0; i < this->size(); i++){
+        this->at(i).~T();
+    }
     dfree(this->alloc_mem_ptr, reinterpret_cast<void**>(&container_ptr), USING_PTR_ADDRESS);
 }
 
@@ -301,7 +325,7 @@ uvector<T>::uvector(uint32_t _size, heap_t *_alloc_mem_ptr){
     this->alloc_mem_ptr = _alloc_mem_ptr;
     uint32_t elements_num = static_cast<uint32_t>(((static_cast<float>(_size))*CAPACITY_RESERVE_KOEF));
     uint32_t alloc_size = sizeof(T)*elements_num;
-    dalloc(this->alloc_mem_ptr, alloc_size, &container_ptr);
+    dalloc(this->alloc_mem_ptr, alloc_size, (void**)&container_ptr);
     if(container_ptr != NULL){
         size_val = _size;
         capacity_val = elements_num;
