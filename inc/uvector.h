@@ -21,7 +21,7 @@
 #include <new>
 #include <type_traits>
 
-#define UVECTOR_VERSION             1.2.0
+#define UVECTOR_VERSION             "1.2.0"
 
 #define CAPACITY_RESERVE_KOEF 		1.2
 #define uvector_debug				printf
