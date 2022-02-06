@@ -198,10 +198,12 @@ template<typename T>
 bool uvector<T>::resize(uint32_t new_vect_size, T value){
     uint32_t old_size = size_val;
     if(resize(new_vect_size) != false){
-        for(uint32_t i = 0; i < new_vect_size - old_size; i++){
-            T* obj_ptr = (T*)((size_t)container_ptr + (i + old_size)*sizeof(T));
-            *obj_ptr = value;
-        }
+    	if(new_vect_size > old_size){
+    		for(uint32_t i = 0; i < new_vect_size - old_size; i++){
+				T* obj_ptr = (T*)((size_t)container_ptr + (i + old_size)*sizeof(T));
+				*obj_ptr = value;
+			}
+    	}
         return true;
     }
     else return false;
