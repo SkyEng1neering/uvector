@@ -43,7 +43,7 @@
 #include <type_traits>
 
 /** @brief Library version string */
-#define UVECTOR_VERSION             "1.2.0"
+#define UVECTOR_VERSION             "1.3.0"
 
 /** @brief Capacity growth factor when resizing (20% extra space) */
 #define CAPACITY_RESERVE_KOEF       1.2

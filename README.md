@@ -2,7 +2,7 @@
 
 Dynamic array container for embedded systems using [dalloc](https://github.com/SkyEng1neering/dalloc) memory allocator.
 
-**Version:** 1.2.0
+**Version:** 1.3.0
 **License:** Apache 2.0
 **Author:** Alexey Vasilenko
 
