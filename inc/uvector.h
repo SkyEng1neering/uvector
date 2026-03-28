@@ -43,7 +43,7 @@
 #include <type_traits>
 
 /** @brief Library version string */
-#define UVECTOR_VERSION             "1.3.0"
+#define UVECTOR_VERSION             "1.3.1"
 
 /** @brief Capacity growth factor when resizing (20% extra space) */
 #define CAPACITY_RESERVE_KOEF       1.2
@@ -376,6 +376,13 @@ uint32_t uvector<T>::size() const{
 
 template<typename T>
 bool uvector<T>::reserve_new_memory(uint32_t new_vect_size, T **cont_ptr){
+#ifdef USE_SINGLE_HEAP_MEMORY
+    /* Lazy init: static objects constructed before dalloc_register_heap()
+     * get alloc_mem_ptr = NULL. Reassign on first allocation attempt. */
+    if(this->alloc_mem_ptr == NULL){
+        this->alloc_mem_ptr = dalloc_get_default_heap();
+    }
+#endif
     uint32_t alloc_size = sizeof(T)*new_vect_size;
     dalloc(this->alloc_mem_ptr, alloc_size, reinterpret_cast<void**>(cont_ptr));
     if(*cont_ptr != NULL){
@@ -389,6 +396,7 @@ bool uvector<T>::reserve(uint32_t new_capacity){
     if(capacity_val >= new_capacity){
        return true;
     }
+    heap_lock(this->alloc_mem_ptr);
     if(reserve_new_memory(new_capacity, &container_ptr_res) != false){
         for(uint32_t i = 0; i < new_capacity; i++){
             new ((T*)((size_t)container_ptr_res + i*sizeof(T))) T;
@@ -396,7 +404,7 @@ bool uvector<T>::reserve(uint32_t new_capacity){
         for(uint32_t i = 0; i < capacity_val; i++){
             T* obj_new_ptr = (T*)((size_t)container_ptr_res + i*sizeof(T));
             T* obj_old_ptr = (T*)((size_t)container_ptr + i*sizeof(T));
-            *obj_new_ptr = *obj_old_ptr;
+            *obj_new_ptr = static_cast<T&&>(*obj_old_ptr);
         }
 
         for(uint32_t i = 0; i < capacity_val; i++){
@@ -409,8 +417,10 @@ bool uvector<T>::reserve(uint32_t new_capacity){
         }
         replace_pointers(this->alloc_mem_ptr, reinterpret_cast<void**>(&container_ptr_res), reinterpret_cast<void**>(&container_ptr));
         capacity_val = new_capacity;
+        heap_unlock(this->alloc_mem_ptr);
         return true;
     }
+    heap_unlock(this->alloc_mem_ptr);
     return false;
 }
 
@@ -421,13 +431,18 @@ uint32_t uvector<T>::capacity() const{
 
 template<typename T>
 void uvector<T>::clear(){
-    // Call destructors on all elements being removed
+    heap_lock(this->alloc_mem_ptr);
     for(uint32_t i = 0; i < size_val; i++){
-        T* obj_ptr = (T*)((size_t)container_ptr + i*sizeof(T));
-        obj_ptr->~T();
-        new (obj_ptr) T;  // Reconstruct to maintain invariant
+        // Scoped destructor: ~T() may trigger dfree/defrag updating container_ptr.
+        // Recompute address from container_ptr after destructor for placement new.
+        {
+            T* obj_ptr = (T*)((size_t)container_ptr + i*sizeof(T));
+            obj_ptr->~T();
+        }
+        new ((T*)((size_t)container_ptr + i*sizeof(T))) T;
     }
     size_val = 0;
+    heap_unlock(this->alloc_mem_ptr);
 }
 
 template<typename T>
@@ -436,13 +451,17 @@ bool uvector<T>::resize(uint32_t new_vect_size){
         return true;
     }
     if(new_vect_size < size_val){
-        // Call destructors on elements being removed
+        heap_lock(this->alloc_mem_ptr);
         for(uint32_t i = new_vect_size; i < size_val; i++){
-            T* obj_ptr = (T*)((size_t)container_ptr + i*sizeof(T));
-            obj_ptr->~T();
-            new (obj_ptr) T;  // Reconstruct to maintain invariant
+            // Scoped destructor: ~T() may trigger dfree/defrag updating container_ptr
+            {
+                T* obj_ptr = (T*)((size_t)container_ptr + i*sizeof(T));
+                obj_ptr->~T();
+            }
+            new ((T*)((size_t)container_ptr + i*sizeof(T))) T;
         }
         size_val = new_vect_size;
+        heap_unlock(this->alloc_mem_ptr);
         return true;
     }
 
@@ -464,6 +483,7 @@ bool uvector<T>::resize(uint32_t new_vect_size){
 template<typename T>
 bool uvector<T>::resize(uint32_t new_vect_size, T value){
     uint32_t old_size = size_val;
+    heap_lock(this->alloc_mem_ptr);
     if(resize(new_vect_size) != false){
     	if(new_vect_size > old_size){
     		for(uint32_t i = 0; i < new_vect_size - old_size; i++){
@@ -471,24 +491,30 @@ bool uvector<T>::resize(uint32_t new_vect_size, T value){
 				*obj_ptr = value;
 			}
     	}
+        heap_unlock(this->alloc_mem_ptr);
         return true;
     }
-    else return false;
+    heap_unlock(this->alloc_mem_ptr);
+    return false;
 }
 
 template<typename T>
 bool uvector<T>::push_back(T item){
+    heap_lock(this->alloc_mem_ptr);
     if(capacity_val > size_val){
         T* obj_ptr = (T*)((size_t)container_ptr + size_val*sizeof(T));
-        *obj_ptr = item;
+        *obj_ptr = static_cast<T&&>(item);
         size_val++;
+        heap_unlock(this->alloc_mem_ptr);
         return true;
     }
     if(resize(size_val + 1) != false){
         T* obj_ptr = (T*)((size_t)container_ptr + (size_val - 1)*sizeof(T));
-        *obj_ptr = item;
+        *obj_ptr = static_cast<T&&>(item);
+        heap_unlock(this->alloc_mem_ptr);
         return true;
     }
+    heap_unlock(this->alloc_mem_ptr);
     return false;
 }
 
@@ -503,35 +529,53 @@ bool uvector<T>::pop(uint32_t i){
         return pop_back();
     }
 
-    // Destroy the element being removed
-    T* removed_obj_ptr = (T*)((size_t)container_ptr + i*sizeof(T));
-    removed_obj_ptr->~T();
-    new (removed_obj_ptr) T;  // Reconstruct for assignment
+    heap_lock(this->alloc_mem_ptr);
 
-    // Shift elements left
+    // Destroy the element being removed. ~T() may trigger dfree/defrag which
+    // updates container_ptr. Do NOT use removed_obj_ptr after this point.
+    {
+        T* removed_obj_ptr = (T*)((size_t)container_ptr + i*sizeof(T));
+        removed_obj_ptr->~T();
+    }
+
+    // Reconstruct at the (possibly updated) position i so the element is in a
+    // valid default state for the copy/move assignment in the shift loop below.
+    // container_ptr was updated by any defrag above, so this computes the NEW
+    // address of element[i] correctly even if the buffer was relocated.
+    new ((T*)((size_t)container_ptr + i*sizeof(T))) T;
+
+    // Shift elements left (uses updated container_ptr after any defrag above)
     for(uint32_t k = i; k < size() - 1; k++){
         T* current_obj_ptr = (T*)((size_t)container_ptr + k*sizeof(T));
         T* next_obj_ptr = (T*)((size_t)container_ptr + (k + 1)*sizeof(T));
-        *current_obj_ptr = *next_obj_ptr;
+        *current_obj_ptr = static_cast<T&&>(*next_obj_ptr);
     }
 
     // Destroy and reconstruct the last element (now a duplicate)
-    T* last_obj_ptr = (T*)((size_t)container_ptr + (size_val - 1)*sizeof(T));
-    last_obj_ptr->~T();
-    new (last_obj_ptr) T;
+    {
+        T* last_obj_ptr = (T*)((size_t)container_ptr + (size_val - 1)*sizeof(T));
+        last_obj_ptr->~T();
+    }
+    new ((T*)((size_t)container_ptr + (size_val - 1)*sizeof(T))) T;
 
     size_val--;
+    heap_unlock(this->alloc_mem_ptr);
     return true;
 }
 
 template<typename T>
 bool uvector<T>::pop_back(){
     if(size_val > 0){
-        // Call destructor on the element being removed
-        T* obj_ptr = (T*)((size_t)container_ptr + (size_val - 1)*sizeof(T));
-        obj_ptr->~T();
-        new (obj_ptr) T;  // Reconstruct to maintain invariant
+        heap_lock(this->alloc_mem_ptr);
+        // Scoped destructor: ~T() may trigger dfree/defrag updating container_ptr.
+        // Recompute address from container_ptr after destructor for placement new.
+        {
+            T* obj_ptr = (T*)((size_t)container_ptr + (size_val - 1)*sizeof(T));
+            obj_ptr->~T();
+        }
+        new ((T*)((size_t)container_ptr + (size_val - 1)*sizeof(T))) T;
         size_val--;
+        heap_unlock(this->alloc_mem_ptr);
         return true;
     }
     return false;
@@ -543,29 +587,27 @@ bool uvector<T>::shrink_to_fit(){
        return true;
     }
 
+    heap_lock(this->alloc_mem_ptr);
     if(size_val == 0){
-        // Destroy all constructed elements before freeing memory
         for(uint32_t i = 0; i < capacity_val; i++){
             T* obj_ptr = (T*)((size_t)container_ptr + i*sizeof(T));
             obj_ptr->~T();
         }
         dfree(this->alloc_mem_ptr, reinterpret_cast<void**>(&container_ptr), USING_PTR_ADDRESS);
         capacity_val = 0;
+        heap_unlock(this->alloc_mem_ptr);
         return true;
     }
 
     if(reserve_new_memory(size_val, &container_ptr_res) != false){
-        // Construct new objects with placement new
         for(uint32_t i = 0; i < size_val; i++){
             new ((T*)((size_t)container_ptr_res + i*sizeof(T))) T;
         }
-        // Copy values
         for(uint32_t i = 0; i < size_val; i++){
             T* obj_ptr_res = (T*)((size_t)container_ptr_res + i*sizeof(T));
             T* obj_ptr = (T*)((size_t)container_ptr + i*sizeof(T));
-            *obj_ptr_res = *obj_ptr;
+            *obj_ptr_res = static_cast<T&&>(*obj_ptr);
         }
-        // Call destructors on old elements
         for(uint32_t i = 0; i < capacity_val; i++){
             T* obj_ptr = (T*)((size_t)container_ptr + i*sizeof(T));
             obj_ptr->~T();
@@ -573,8 +615,10 @@ bool uvector<T>::shrink_to_fit(){
         dfree(this->alloc_mem_ptr, reinterpret_cast<void**>(&container_ptr), USING_PTR_ADDRESS);
         replace_pointers(this->alloc_mem_ptr, reinterpret_cast<void**>(&container_ptr_res), reinterpret_cast<void**>(&container_ptr));
         capacity_val = size_val;
+        heap_unlock(this->alloc_mem_ptr);
         return true;
     }
+    heap_unlock(this->alloc_mem_ptr);
     return false;
 }
 
@@ -603,7 +647,7 @@ void uvector<T>::info(){
 template<typename T>
 uvector<T>& uvector<T>::operator = (const uvector &vect){
     if(&vect != this){
-        // Free existing memory if allocated
+        heap_lock(this->alloc_mem_ptr);
         if(container_ptr != NULL){
             for(uint32_t i = 0; i < capacity_val; i++){
                 T* obj_ptr = (T*)((size_t)container_ptr + i*sizeof(T));
@@ -619,6 +663,7 @@ uvector<T>& uvector<T>::operator = (const uvector &vect){
         for(uint32_t i = 0; i < vect.size(); i++){
             this->push_back(vect.data()[i]);
         }
+        heap_unlock(this->alloc_mem_ptr);
     }
     return *this;
 }
@@ -626,11 +671,40 @@ uvector<T>& uvector<T>::operator = (const uvector &vect){
 template<typename T>
 uvector<T>::~uvector(){
     if(container_ptr != NULL){
-        for(uint32_t i = 0; i < capacity_val; i++){
-            T* obj_ptr = (T*)((size_t)container_ptr + i*sizeof(T));
-            obj_ptr->~T();
+        /* Capture all needed members to stack BEFORE element destructors run.
+         *
+         * When this uvector is a member of a heap-allocated object (e.g. inside
+         * CompositeModifier inside usmart_ptr), element destructors may trigger
+         * dfree → defrag, which shifts the containing object (and this uvector).
+         * After the shift, 'this' is stale — any read of this->container_ptr,
+         * this->capacity_val etc. returns garbage.
+         *
+         * Fix: save everything to stack locals, then use replace_pointers to
+         * redirect buffer tracking from the heap member to a stack variable.
+         * When defrag moves the buffer, it updates the stack variable. */
+        heap_t* saved_heap = alloc_mem_ptr;
+        uint32_t saved_cap = capacity_val;
+
+        heap_lock(saved_heap);
+
+        /* Move buffer tracking: container_ptr (heap) → saved_data (stack).
+         * After this, dalloc's alloc_info for the buffer tracks &saved_data.
+         * Defrag will update saved_data on the stack when the buffer moves. */
+        T* saved_data = NULL;
+        replace_pointers(saved_heap, (void**)&container_ptr, (void**)&saved_data);
+
+        /* Destroy elements.  Each destructor may trigger dfree → defrag.
+         * Defrag updates saved_data on the stack if the buffer moves,
+         * so saved_data[i+1] always refers to the correct element. */
+        for(uint32_t i = 0; i < saved_cap; i++){
+            saved_data[i].~T();
         }
-        dfree(this->alloc_mem_ptr, reinterpret_cast<void**>(&container_ptr), USING_PTR_ADDRESS);
+
+        /* Free the buffer via the stack tracking variable. */
+        dfree(saved_heap, (void**)&saved_data, USING_PTR_ADDRESS);
+
+        heap_unlock(saved_heap);
+        /* DO NOT access *this past this point — it is stale. */
     }
 }
 
@@ -641,9 +715,11 @@ uvector<T>::uvector(const uvector &vector){
     container_ptr = NULL;
     container_ptr_res = NULL;
     this->alloc_mem_ptr = vector.alloc_mem_ptr;
+    heap_lock(this->alloc_mem_ptr);
     for(uint32_t i = 0; i < vector.size(); i++){
         this->push_back(vector.data()[i]);
     }
+    heap_unlock(this->alloc_mem_ptr);
 }
 
 #ifdef USE_SINGLE_HEAP_MEMORY

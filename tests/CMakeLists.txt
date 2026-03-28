@@ -43,10 +43,12 @@ set(MULTIHEAP_TEST_SOURCES
     test_capacity.cpp
     test_modifiers.cpp
     test_copy_semantics.cpp
+    test_move_semantics.cpp
     test_type_traits.cpp
     test_edge_cases.cpp
     test_stress.cpp
     test_integrity.cpp
+    test_nested_containers.cpp
 )
 
 # Multi-heap test executable
@@ -89,7 +91,33 @@ target_compile_definitions(uvector_single_heap_tests PRIVATE
     USE_SINGLE_HEAP_MEMORY
 )
 
+# ==================== Thread Safety Tests ====================
+
+# dalloc library with thread safety enabled (recursive pthread mutex)
+add_library(dalloc_threadsafe STATIC ../../dalloc/src/dalloc.c)
+target_include_directories(dalloc_threadsafe PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../dalloc/inc
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_compile_definitions(dalloc_threadsafe PUBLIC
+    DALLOC_CUSTOM_CONF_FILE="uvector_pthread_conf.h"
+)
+
+# Thread safety test executable
+add_executable(uvector_thread_tests test_thread_safety.cpp)
+target_link_libraries(uvector_thread_tests
+    dalloc_threadsafe
+    GTest::gtest_main
+    pthread
+)
+target_include_directories(uvector_thread_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../inc
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../dalloc/inc
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
 # Enable CTest integration
 include(GoogleTest)
 gtest_discover_tests(uvector_tests)
 gtest_discover_tests(uvector_single_heap_tests)
+gtest_discover_tests(uvector_thread_tests)
